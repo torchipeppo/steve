@@ -14,7 +14,8 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 
 from steve import STEVE
-from data import GlobVideoDataset
+# from data import GlobVideoDataset
+from phyre.dataset import PhyreVideoDataset
 from utils import cosine_anneal, linear_warmup
 
 
@@ -72,8 +73,10 @@ log_dir = os.path.join(args.log_path, datetime.today().isoformat())
 writer = SummaryWriter(log_dir)
 writer.add_text('hparams', arg_str)
 
-train_dataset = GlobVideoDataset(root=args.data_path, phase='train', img_size=args.image_size, ep_len=args.ep_len, img_glob='????????_image.png')
-val_dataset = GlobVideoDataset(root=args.data_path, phase='val', img_size=args.image_size, ep_len=args.ep_len, img_glob='????????_image.png')
+# train_dataset = GlobVideoDataset(root=args.data_path, phase='train', img_size=args.image_size, ep_len=args.ep_len, img_glob='????????_image.png')
+# val_dataset = GlobVideoDataset(root=args.data_path, phase='val', img_size=args.image_size, ep_len=args.ep_len, img_glob='????????_image.png')
+train_dataset = PhyreVideoDataset(args.data_path)
+val_dataset = train_dataset
 
 loader_kwargs = {
     'batch_size': args.batch_size,
@@ -83,13 +86,13 @@ loader_kwargs = {
     'drop_last': True,
 }
 
-train_loader = DataLoader(train_dataset, sampler=None, **loader_kwargs)
-val_loader = DataLoader(val_dataset, sampler=None, **loader_kwargs)
+# train_loader = DataLoader(train_dataset, sampler=None, **loader_kwargs)
+# val_loader = DataLoader(val_dataset, sampler=None, **loader_kwargs)
 
-train_epoch_size = len(train_loader)
-val_epoch_size = len(val_loader)
+train_epoch_size = len(train_dataset)
+val_epoch_size = len(val_dataset)
 
-log_interval = train_epoch_size // 5
+log_interval = 10 # train_epoch_size // 5
 
 model = STEVE(args)
 
@@ -126,11 +129,12 @@ def visualize(video, recon_dvae, recon_tf, attns, N=8):
     for t in range(T):
         video_t = video[:N, t, None, :, :, :]
         recon_dvae_t = recon_dvae[:N, t, None, :, :, :]
-        recon_tf_t = recon_tf[:N, t, None, :, :, :]
-        attns_t = attns[:N, t, :, :, :, :]
+        # recon_tf_t = recon_tf[:N, t, None, :, :, :]
+        # attns_t = attns[:N, t, :, :, :, :]
 
         # tile
-        tiles = torch.cat((video_t, recon_dvae_t, recon_tf_t, attns_t), dim=1).flatten(end_dim=1)
+        # tiles = torch.cat((video_t, recon_dvae_t, recon_tf_t, attns_t), dim=1).flatten(end_dim=1)
+        tiles = torch.cat((video_t, recon_dvae_t), dim=1).flatten(end_dim=1)
 
         # grid
         frame = vutils.make_grid(tiles, nrow=(args.num_slots + 3), pad_value=0.8)
@@ -144,7 +148,10 @@ def visualize(video, recon_dvae, recon_tf, attns, N=8):
 for epoch in range(start_epoch, args.epochs):
     model.train()
     
-    for batch, video in enumerate(train_loader):
+    # for batch, video in enumerate(train_loader):
+    for i in range(len(train_dataset)):
+        batch = i
+        video = train_dataset[i][None, ...]
         global_step = epoch * train_epoch_size + batch
 
         tau = cosine_anneal(
@@ -180,11 +187,11 @@ for epoch in range(start_epoch, args.epochs):
         
         (recon, cross_entropy, mse, attns) = model(video, tau, args.hard)
 
-        if args.use_dp:
-            mse = mse.mean()
-            cross_entropy = cross_entropy.mean()
+        # if args.use_dp:
+        #     mse = mse.mean()
+        #     cross_entropy = cross_entropy.mean()
 
-        loss = mse + cross_entropy
+        loss = mse # + cross_entropy
         
         loss.backward()
         clip_grad_norm_(model.parameters(), args.clip, 'inf')
@@ -196,18 +203,19 @@ for epoch in range(start_epoch, args.epochs):
                       epoch+1, batch, train_epoch_size, loss.item(), mse.item()))
                 
                 writer.add_scalar('TRAIN/loss', loss.item(), global_step)
-                writer.add_scalar('TRAIN/cross_entropy', cross_entropy.item(), global_step)
-                writer.add_scalar('TRAIN/mse', mse.item(), global_step)
+                # writer.add_scalar('TRAIN/cross_entropy', cross_entropy.item(), global_step)
+                # writer.add_scalar('TRAIN/mse', mse.item(), global_step)
 
                 writer.add_scalar('TRAIN/tau', tau, global_step)
                 writer.add_scalar('TRAIN/lr_dvae', optimizer.param_groups[0]['lr'], global_step)
                 writer.add_scalar('TRAIN/lr_enc', optimizer.param_groups[1]['lr'], global_step)
                 writer.add_scalar('TRAIN/lr_dec', optimizer.param_groups[2]['lr'], global_step)
 
-    with torch.no_grad():
-        gen_video = (model.module if args.use_dp else model).reconstruct_autoregressive(video[:8])
-        frames = visualize(video, recon, gen_video, attns, N=8)
-        writer.add_video('TRAIN_recons/epoch={:03}'.format(epoch+1), frames)
+#     with torch.no_grad():
+                # gen_video = (model.module if args.use_dp else model).reconstruct_autoregressive(video[:8])
+                gen_video = recon
+                frames = visualize(video, recon, gen_video, attns, N=8)
+                writer.add_video('TRAIN_recons/epoch={:03}/i={:05}'.format(epoch+1, i), frames)
     
     with torch.no_grad():
         model.eval()
@@ -215,25 +223,28 @@ for epoch in range(start_epoch, args.epochs):
         val_cross_entropy = 0.
         val_mse = 0.
 
-        for batch, video in enumerate(val_loader):
+        # for batch, video in enumerate(val_loader):
+        for i in range(len(val_dataset)):
+            batch = i
+            video = val_dataset[i][None, ...]
             video = video.cuda()
 
             (recon, cross_entropy, mse, attns) = model(video, tau, args.hard)
 
-            if args.use_dp:
-                mse = mse.mean()
-                cross_entropy = cross_entropy.mean()
+            # if args.use_dp:
+            #     mse = mse.mean()
+            #     cross_entropy = cross_entropy.mean()
 
-            val_cross_entropy += cross_entropy.item()
+            # val_cross_entropy += cross_entropy.item()
             val_mse += mse.item()
 
-        val_cross_entropy /= (val_epoch_size)
+        # val_cross_entropy /= (val_epoch_size)
         val_mse /= (val_epoch_size)
 
-        val_loss = val_mse + val_cross_entropy
+        val_loss = val_mse # + val_cross_entropy
 
         writer.add_scalar('VAL/loss', val_loss, epoch+1)
-        writer.add_scalar('VAL/cross_entropy', val_cross_entropy, epoch + 1)
+        # writer.add_scalar('VAL/cross_entropy', val_cross_entropy, epoch + 1)
         writer.add_scalar('VAL/mse', val_mse, epoch+1)
 
         print('====> Epoch: {:3} \t Loss = {:F}'.format(epoch+1, val_loss))
@@ -248,7 +259,8 @@ for epoch in range(start_epoch, args.epochs):
                 torch.save(model.module.state_dict() if args.use_dp else model.state_dict(), os.path.join(log_dir, f'best_model_until_{args.steps}_steps.pt'))
 
             if 50 <= epoch:
-                gen_video = (model.module if args.use_dp else model).reconstruct_autoregressive(video[:8])
+                # gen_video = (model.module if args.use_dp else model).reconstruct_autoregressive(video[:8])
+                gen_video = recon
                 frames = visualize(video, recon, gen_video, attns, N=8)
                 writer.add_video('VAL_recons/epoch={:03}'.format(epoch + 1), frames)
 

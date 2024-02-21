@@ -12,18 +12,58 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from datetime import datetime
+import einops
 
 from steve import STEVE
-from data import GlobVideoDataset
+# from data import GlobVideoDataset
+from phyre.dataset import PhyreVideoDataset
 from utils import cosine_anneal, linear_warmup
+
+def make_batch_padded(list_of_samples):
+    max_len = 0
+    for video in list_of_samples:
+        t = video.shape[0]
+        if t > max_len:
+            max_len = t
+    padded_samples = []
+    padding_masks = []
+    for video in list_of_samples:
+        padding = einops.repeat(video[-1, :, :, :], "c w h -> repeat c w h", repeat = max_len-video.shape[0])
+        # padded_video = einops.rearrange([video, padding], "listaxis t c w h -> (listaxis t) c w h")
+        padded_video = torch.cat([video, padding], dim=0)
+        padded_samples.append(padded_video)
+        mask = [i>=video.shape[0] for i in range(max_len)]
+        mask = torch.Tensor(mask).bool()
+        padding_masks.append(mask)
+    # listaxis is batch axis
+    padded_samples = einops.rearrange(padded_samples, "listaxis t c w h -> listaxis t c w h")
+    padding_masks = einops.rearrange(padding_masks, "listaxis m -> listaxis m")
+    return padded_samples, padding_masks
+
+def make_batch_truncated(list_of_samples):
+    min_len = 999
+    for video in list_of_samples:
+        t = video.shape[0]
+        if t < min_len:
+            min_len = t
+    padded_samples = []
+    for video in list_of_samples:
+        padded_samples.append(video[:min_len])
+    # listaxis is batch axis
+    padded_samples = einops.rearrange(padded_samples, "listaxis t c w h -> listaxis t c w h")
+    return padded_samples, torch.ones_like(padded_samples, dtype=torch.bool)
+
+def collate_fn(list_of_samples):
+    samples, padding_mask = make_batch_truncated(list_of_samples)
+    return samples
 
 
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--seed', type=int, default=0)
-parser.add_argument('--batch_size', type=int, default=24)
+parser.add_argument('--batch_size', type=int, default=5)
 parser.add_argument('--num_workers', type=int, default=4)
-parser.add_argument('--image_size', type=int, default=128)
+# parser.add_argument('--image_size', type=int, default=128)
 parser.add_argument('--img_channels', type=int, default=3)
 parser.add_argument('--ep_len', type=int, default=3)
 
@@ -37,7 +77,7 @@ parser.add_argument('--lr_dec', type=float, default=3e-4)
 parser.add_argument('--lr_warmup_steps', type=int, default=30000)
 parser.add_argument('--lr_half_life', type=int, default=250000)
 parser.add_argument('--clip', type=float, default=0.05)
-parser.add_argument('--epochs', type=int, default=500)
+parser.add_argument('--epochs', type=int, default=1)
 parser.add_argument('--steps', type=int, default=200000)
 
 parser.add_argument('--num_iterations', type=int, default=2)
@@ -63,6 +103,7 @@ parser.add_argument('--hard', action='store_true')
 parser.add_argument('--use_dp', default=True, action='store_true')
 
 args = parser.parse_args()
+args.image_size=64  # my phyre-dataset kinda hardcodes this
 
 torch.manual_seed(args.seed)
 
@@ -72,8 +113,10 @@ log_dir = os.path.join(args.log_path, datetime.today().isoformat())
 writer = SummaryWriter(log_dir)
 writer.add_text('hparams', arg_str)
 
-train_dataset = GlobVideoDataset(root=args.data_path, phase='train', img_size=args.image_size, ep_len=args.ep_len, img_glob='????????_image.png')
-val_dataset = GlobVideoDataset(root=args.data_path, phase='val', img_size=args.image_size, ep_len=args.ep_len, img_glob='????????_image.png')
+# train_dataset = GlobVideoDataset(root=args.data_path, phase='train', img_size=args.image_size, ep_len=args.ep_len, img_glob='????????_image.png')
+# val_dataset = GlobVideoDataset(root=args.data_path, phase='val', img_size=args.image_size, ep_len=args.ep_len, img_glob='????????_image.png')
+train_dataset = PhyreVideoDataset(args.data_path)
+val_dataset = train_dataset
 
 loader_kwargs = {
     'batch_size': args.batch_size,
@@ -83,13 +126,13 @@ loader_kwargs = {
     'drop_last': True,
 }
 
-train_loader = DataLoader(train_dataset, sampler=None, **loader_kwargs)
-val_loader = DataLoader(val_dataset, sampler=None, **loader_kwargs)
+train_loader = DataLoader(train_dataset, sampler=None, collate_fn=collate_fn, **loader_kwargs)
+val_loader = DataLoader(val_dataset, sampler=None, collate_fn=collate_fn, **loader_kwargs)
 
 train_epoch_size = len(train_loader)
 val_epoch_size = len(val_loader)
 
-log_interval = train_epoch_size // 5
+log_interval = 10 # train_epoch_size // 5
 
 model = STEVE(args)
 
@@ -204,10 +247,10 @@ for epoch in range(start_epoch, args.epochs):
                 writer.add_scalar('TRAIN/lr_enc', optimizer.param_groups[1]['lr'], global_step)
                 writer.add_scalar('TRAIN/lr_dec', optimizer.param_groups[2]['lr'], global_step)
 
-    with torch.no_grad():
-        gen_video = (model.module if args.use_dp else model).reconstruct_autoregressive(video[:8])
-        frames = visualize(video, recon, gen_video, attns, N=8)
-        writer.add_video('TRAIN_recons/epoch={:03}'.format(epoch+1), frames)
+#     with torch.no_grad():
+                gen_video = (model.module if args.use_dp else model).reconstruct_autoregressive(video[:8])
+                frames = visualize(video, recon, gen_video, attns, N=8)
+                writer.add_video('TRAIN_recons/epoch={:03}/batch={:05}'.format(epoch+1, batch), frames)
     
     with torch.no_grad():
         model.eval()

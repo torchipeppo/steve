@@ -1,7 +1,7 @@
 from torch.utils.data import Dataset
 from pathlib import Path
 import phyre.fsvisit as fsvisit
-import hickle as hkl
+import h5py
 import torch
 import torch.nn.functional as F
 import phyre.vis
@@ -22,7 +22,11 @@ class PhyreVideoDataset(Dataset):
         return len(self.video_paths)
     
     def __getitem__(self, idx):
-        video_phyre = hkl.load(self.video_paths[idx]).astype(int)
+        # https://stackoverflow.com/questions/46733052/read-hdf5-file-into-numpy-array
+        # .get is the normal dictionary method,
+        # [:] is a full slice that has the effect of converting the h5py Dataset into a numpy array (don't know if it's hacky or the legit way)
+        f = h5py.File(self.video_paths[idx], 'r')
+        video_phyre = f.get("data")[:].astype(int)
         video_phyre = einops.rearrange(video_phyre, "t w h -> w h t")
         video_rgb = phyre.vis.observations_to_float_rgb(video_phyre)
         video_rgb = einops.rearrange(video_rgb, "w h t c -> t c w h")

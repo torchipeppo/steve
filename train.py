@@ -19,6 +19,9 @@ from steve import STEVE
 from phyre.dataset import PhyreVideoDataset
 from utils import cosine_anneal, linear_warmup
 
+import pickle
+import json
+
 def make_batch_padded(list_of_samples):
     max_len = 0
     for video in list_of_samples:
@@ -306,6 +309,12 @@ for epoch in range(start_epoch, args.epochs):
         }
 
         torch.save(checkpoint, os.path.join(log_dir, 'checkpoint.pt.tar'))
+
+        # save config for two reasons: ease of review, and replication of the same trained architecture over to my side
+        with open(os.path.join(log_dir, 'args.pkl'), "wb") as f:
+            pickle.dump(args, f)
+        with open(os.path.join(log_dir, 'args_readable.json'), "w") as f:
+            json.dump(args.vars(), f, sort_keys=True, indent=4)
 
         print('====> Best Loss = {:F} @ Epoch {}'.format(best_val_loss, best_epoch))
 
